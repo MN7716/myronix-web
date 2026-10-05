@@ -44,7 +44,7 @@ function siteMeta(siteUrl: string): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
   return {
-    base: env.VITE_BASE || "/",
+    base: env.VITE_BASE || "/myronix-web/",
     plugins: [react(), siteMeta(env.VITE_SITE_URL || "")],
     build: { target: "es2020", sourcemap: false },
   };

@@ -1,3 +1,4 @@
+import AdminDashboard from "./components/AdminDashboard";
 import { useCallback, useState } from "react";
 import Navbar from "./components/Navbar";
 import Hero from "./components/Hero";
@@ -23,6 +24,9 @@ export default function App() {
     }, 60);
   }, []);
 
+  if (window.location.pathname === "/admin") {
+  return <AdminDashboard />;
+}
   return (
     <>
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-white focus:px-4 focus:py-2">Skip to content</a>

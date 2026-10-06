@@ -24,7 +24,7 @@ export default function App() {
     }, 60);
   }, []);
 
-  if (window.location.pathname === "/admin") {
+  if (window.location.pathname === "/myronix-web/admin") {
   return <AdminDashboard />;
 }
   return (

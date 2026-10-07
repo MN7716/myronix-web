@@ -2130,5 +2130,5 @@ export default function EnquiryForm({
       </div>
     </section>
     );
-}
-}
+ }
+ }

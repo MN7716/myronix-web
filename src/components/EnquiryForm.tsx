@@ -34,11 +34,51 @@ type OrderLoadStatus = "loading" | "loaded" | "empty" | "error";
 type AuthMode = "signin" | "signup";
 type AuthState = "checking" | "signedout" | "signedin";
 
+type Deliverable = {
+  id: string;
+  order_id: string;
+  user_id: string;
+  file_name: string;
+  file_path: string;
+  file_type: string | null;
+  file_size: number | null;
+  is_preview: boolean;
+  payment_required: boolean;
+  created_at: string;
+};
+
+type DeliverableLoadStatus = "idle" | "loading" | "loaded" | "empty" | "error";
+
+type ProjectActivity = {
+  id: string;
+  order_id: string;
+  user_id: string;
+  actor_role: string;
+  activity_type: string;
+  message: string;
+  created_at: string;
+};
+
+type ProjectMessage = {
+  id: string;
+  order_id: string;
+  user_id: string;
+  sender_role: string;
+  message: string;
+  created_at: string;
+};
+
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 const ACCESS_TOKEN_KEY = "myronix_access_token";
 const STORAGE_BUCKET = "project-references";
+const DELIVERABLE_BUCKET = "project-deliverables";
+
+const UPI_ID = "manowar000007@oksbi";
+const UPI_NAME = "MYRONIX INDUSTRIES";
+const UPI_LINK = `upi://pay?pa=${encodeURIComponent(UPI_ID)}&pn=${encodeURIComponent(UPI_NAME)}&cu=INR`;
+const UPI_QR_PATH = "/GooglePay_QR.png";
 
 const MAX_FILES = 5;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -205,6 +245,231 @@ async function uploadReferenceFiles(
   }
 }
 
+
+type PaymentInfo = {
+  status: string | null;
+  submittedAt: string | null;
+};
+
+async function loadPaymentStatus(orderId: string): Promise<PaymentInfo> {
+  const accessToken = getAccessToken();
+
+  if (!accessToken || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return { status: null, submittedAt: null };
+  }
+
+  const res = await fetch(
+    `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/project_enquiries?id=eq.${encodeURIComponent(
+      orderId
+    )}&select=payment_status,payment_submitted_at`,
+    {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error("Payment status could not be loaded.");
+  }
+
+  const rows = await res.json();
+  return {
+    status: rows?.[0]?.payment_status ?? null,
+    submittedAt: rows?.[0]?.payment_submitted_at ?? null,
+  };
+}
+
+async function submitPaymentConfirmation(orderId: string): Promise<void> {
+  const accessToken = getAccessToken();
+
+  if (!accessToken || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("Your session has expired. Please sign in again.");
+  }
+
+  const res = await fetch(
+    `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/rpc/submit_payment_confirmation`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ p_order_id: orderId }),
+    }
+  );
+
+  if (!res.ok) {
+    const result = await res.json().catch(() => ({}));
+    throw new Error(
+      result?.message ||
+        result?.details ||
+        result?.hint ||
+        "Payment confirmation could not be submitted."
+    );
+  }
+}
+
+async function loadDeliverables(orderId: string): Promise<Deliverable[]> {
+  const accessToken = getAccessToken();
+
+  if (!accessToken || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return [];
+  }
+
+  const res = await fetch(
+    `${SUPABASE_URL.replace(
+      /\/$/,
+      ""
+    )}/rest/v1/project_deliverables?order_id=eq.${encodeURIComponent(
+      orderId
+    )}&select=id,order_id,user_id,file_name,file_path,file_type,file_size,is_preview,payment_required,created_at&order=created_at.desc`,
+    {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error("Deliverables could not be loaded.");
+  }
+
+  return await res.json();
+}
+
+async function getSignedDeliverableUrl(filePath: string): Promise<string> {
+  const accessToken = getAccessToken();
+
+  if (!accessToken || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("Your session has expired. Please sign in again.");
+  }
+
+  const res = await fetch(
+    `${SUPABASE_URL.replace(/\/$/, "")}/storage/v1/object/sign/${DELIVERABLE_BUCKET}/${filePath}`,
+    {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expiresIn: 60 * 15 }),
+    }
+  );
+
+  const result = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(
+      result.message ||
+        result.error ||
+        result.error_description ||
+        "The file could not be opened."
+    );
+  }
+
+  const signedPath = result.signedURL || result.signedUrl || result.path;
+
+  if (!signedPath) {
+    throw new Error("No secure file URL was returned.");
+  }
+
+  if (/^https?:\/\//i.test(signedPath)) {
+    return signedPath;
+  }
+
+  return `${SUPABASE_URL.replace(/\/$/, "")}/storage/v1${signedPath.startsWith("/") ? "" : "/"}${signedPath}`;
+}
+
+async function loadProjectActivities(orderId: string): Promise<ProjectActivity[]> {
+  const accessToken = getAccessToken();
+
+  if (!accessToken || !SUPABASE_URL || !SUPABASE_ANON_KEY) return [];
+
+  const res = await fetch(
+    `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/project_activities?order_id=eq.${encodeURIComponent(orderId)}&select=id,order_id,user_id,actor_role,activity_type,message,created_at&order=created_at.desc`,
+    {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!res.ok) throw new Error("Project timeline could not be loaded.");
+  return await res.json();
+}
+
+async function loadProjectMessages(orderId: string): Promise<ProjectMessage[]> {
+  const accessToken = getAccessToken();
+
+  if (!accessToken || !SUPABASE_URL || !SUPABASE_ANON_KEY) return [];
+
+  const res = await fetch(
+    `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/project_messages?order_id=eq.${encodeURIComponent(orderId)}&select=id,order_id,user_id,sender_role,message,created_at&order=created_at.asc`,
+    {
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!res.ok) throw new Error("Messages could not be loaded.");
+  return await res.json();
+}
+
+async function sendProjectMessage(orderId: string, message: string): Promise<ProjectMessage> {
+  const accessToken = getAccessToken();
+
+  if (!accessToken || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error("Your session has expired. Please sign in again.");
+  }
+
+  const { id: userId } = await getCurrentUser();
+  const res = await fetch(
+    `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/project_messages`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken}`,
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        order_id: orderId,
+        user_id: userId,
+        sender_role: "customer",
+        message: message.trim(),
+      }),
+    }
+  );
+
+  const result = await res.json().catch(() => []);
+  if (!res.ok) {
+    throw new Error(result?.message || result?.details || "Message could not be sent.");
+  }
+
+  return Array.isArray(result) ? result[0] : result;
+}
+
+function formatDeliverableSize(size: number | null): string {
+  if (!size || size <= 0) return "Size unavailable";
+
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 export default function EnquiryForm({
   prefill,
 }: {
@@ -238,6 +503,26 @@ export default function EnquiryForm({
 
   const [fileError, setFileError] = useState("");
   const [uploadWarning, setUploadWarning] = useState("");
+
+  const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
+  const [deliverableLoadStatus, setDeliverableLoadStatus] =
+    useState<DeliverableLoadStatus>("idle");
+  const [deliverableError, setDeliverableError] = useState("");
+  const [openingDeliverableId, setOpeningDeliverableId] = useState<string | null>(null);
+  const [paymentStatus, setPaymentStatus] = useState<string | null>(null);
+  const [paymentSubmittedAt, setPaymentSubmittedAt] = useState<string | null>(null);
+  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
+  const [paymentMessage, setPaymentMessage] = useState("");
+  const [paymentError, setPaymentError] = useState("");
+  const [showPaymentQr, setShowPaymentQr] = useState(false);
+  const [messages, setMessages] = useState<ProjectMessage[]>([]);
+  const [activities, setActivities] = useState<ProjectActivity[]>([]);
+  const [activitiesLoading, setActivitiesLoading] = useState(false);
+  const [activitiesError, setActivitiesError] = useState("");
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messageSending, setMessageSending] = useState(false);
+  const [messageText, setMessageText] = useState("");
+  const [messageError, setMessageError] = useState("");
 
   const honeypot = useRef<HTMLInputElement>(null);
   const lastSent = useRef(0);
@@ -337,6 +622,142 @@ export default function EnquiryForm({
     };
   }, [authState]);
 
+  async function refreshCustomerWork(orderId: string) {
+    setDeliverableLoadStatus("loading");
+    setDeliverableError("");
+
+    try {
+      const [statusResult, workResult] = await Promise.all([
+        loadPaymentStatus(orderId),
+        loadDeliverables(orderId),
+      ]);
+
+      setPaymentStatus(statusResult.status);
+      setPaymentSubmittedAt(statusResult.submittedAt);
+      setDeliverables(workResult);
+      setDeliverableLoadStatus(workResult.length ? "loaded" : "empty");
+    } catch (err) {
+      setDeliverableLoadStatus("error");
+      setDeliverableError(
+        err instanceof Error
+          ? err.message
+          : "Your MYRONIX work could not be loaded."
+      );
+    }
+  }
+
+  async function refreshActivities(orderId: string) {
+    setActivitiesLoading(true);
+    setActivitiesError("");
+    try {
+      const result = await loadProjectActivities(orderId);
+      setActivities(result);
+    } catch (err) {
+      setActivitiesError(
+        err instanceof Error ? err.message : "Project timeline could not be loaded."
+      );
+    } finally {
+      setActivitiesLoading(false);
+    }
+  }
+
+  async function refreshMessages(orderId: string) {
+    setMessagesLoading(true);
+    setMessageError("");
+    try {
+      const result = await loadProjectMessages(orderId);
+      setMessages(result);
+    } catch (err) {
+      setMessageError(err instanceof Error ? err.message : "Messages could not be loaded.");
+    } finally {
+      setMessagesLoading(false);
+    }
+  }
+
+  async function handleSendMessage() {
+    if (!savedOrder || !messageText.trim()) return;
+    setMessageSending(true);
+    setMessageError("");
+    try {
+      const message = await sendProjectMessage(savedOrder.id, messageText);
+      setMessages((current) => [...current, message]);
+      setMessageText("");
+      await refreshActivities(savedOrder.id);
+    } catch (err) {
+      setMessageError(err instanceof Error ? err.message : "Message could not be sent.");
+    } finally {
+      setMessageSending(false);
+    }
+  }
+
+  async function handlePaymentConfirmation() {
+    if (!savedOrder || paymentStatus === "paid" || paymentSubmitting) return;
+
+    setPaymentSubmitting(true);
+    setPaymentError("");
+    setPaymentMessage("");
+
+    try {
+      await submitPaymentConfirmation(savedOrder.id);
+      setPaymentSubmittedAt(new Date().toISOString());
+      setPaymentMessage(
+        "Payment confirmation submitted. MYRONIX will verify your payment before the final work is unlocked."
+      );
+      await refreshCustomerWork(savedOrder.id);
+    } catch (err) {
+      setPaymentError(
+        err instanceof Error
+          ? err.message
+          : "Payment confirmation could not be submitted."
+      );
+    } finally {
+      setPaymentSubmitting(false);
+    }
+  }
+
+  async function openDeliverable(file: Deliverable) {
+    if (file.payment_required && paymentStatus !== "paid") {
+      setDeliverableError(
+        "Final work is locked until your payment is marked as paid."
+      );
+      return;
+    }
+
+    setOpeningDeliverableId(file.id);
+    setDeliverableError("");
+
+    try {
+      const url = await getSignedDeliverableUrl(file.file_path);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setDeliverableError(
+        err instanceof Error
+          ? err.message
+          : "The file could not be opened."
+      );
+    } finally {
+      setOpeningDeliverableId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!savedOrder || authState !== "signedin") {
+      setDeliverables([]);
+      setPaymentStatus(null);
+      setPaymentSubmittedAt(null);
+      setPaymentMessage("");
+      setPaymentError("");
+      setDeliverableLoadStatus("empty");
+      setActivities([]);
+      setActivitiesError("");
+      return;
+    }
+
+    refreshCustomerWork(savedOrder.id);
+    refreshMessages(savedOrder.id);
+    refreshActivities(savedOrder.id);
+  }, [savedOrder?.id, authState]);
+
   useEffect(() => {
     if (!prefill) return;
 
@@ -414,7 +835,6 @@ export default function EnquiryForm({
 
         return;
       }
-    }
 
     setSelectedFiles(incoming);
   }
@@ -559,6 +979,17 @@ export default function EnquiryForm({
     setSavedOrder(null);
     setOrderLoadStatus("empty");
     setSelectedFiles([]);
+    setDeliverables([]);
+    setPaymentStatus(null);
+    setPaymentSubmittedAt(null);
+    setPaymentMessage("");
+    setPaymentError("");
+    setShowPaymentQr(false);
+    setDeliverableError("");
+    setDeliverableLoadStatus("empty");
+    setMessages([]);
+    setMessageText("");
+    setMessageError("");
     setAuthState("signedout");
     setAuthMessage("");
   }
@@ -638,6 +1069,10 @@ export default function EnquiryForm({
 
       setSavedOrder(order);
       setOrderLoadStatus(order ? "loaded" : "empty");
+
+      if (order) {
+        await refreshCustomerWork(order.id);
+      }
 
       if (referenceUploadFailed) {
         setUploadWarning(
@@ -756,6 +1191,338 @@ export default function EnquiryForm({
                 </div>
               </div>
             )}
+
+          {authState === "signedin" &&
+            savedOrder &&
+            orderLoadStatus === "loaded" && (
+              <div className="mt-6 rounded-lg border border-line bg-white p-6">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink/60">
+                      Your MYRONIX work
+                    </p>
+                    <h3 className="mt-2 text-xl font-semibold">
+                      Files & deliverables
+                    </h3>
+                    <p className="mt-1 text-sm text-ink/70">
+                      Preview files are available when uploaded. Final files unlock after payment.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="btn btn-ghost-light"
+                    disabled={deliverableLoadStatus === "loading"}
+                    onClick={() => refreshCustomerWork(savedOrder.id)}
+                  >
+                    {deliverableLoadStatus === "loading" ? "Refreshing…" : "Refresh"}
+                  </button>
+                </div>
+
+                {paymentStatus && (
+                  <div className="mt-5 rounded-md border border-line bg-mist p-4">
+                    <p className="text-sm">
+                      <span className="font-semibold">Payment status:</span>{" "}
+                      {paymentStatus === "paid" ? "Paid" : "Pending"}
+                    </p>
+                  </div>
+                )}
+
+                {paymentStatus !== "paid" && (
+                  <div className="mt-5 rounded-lg border border-line bg-white p-5">
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink/60">
+                          PAYMENT
+                        </p>
+                        <h4 className="mt-2 text-lg font-semibold">Pay via UPI</h4>
+                        <p className="mt-1 max-w-xl text-sm text-ink/70">
+                          Pay using a compatible UPI app. If the button does not open your UPI app, use the QR code below.
+                        </p>
+                      </div>
+
+                      <a
+                        href={UPI_LINK}
+                        className="btn btn-primary shrink-0 text-center"
+                      >
+                        PAY VIA UPI
+                      </a>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        className="btn btn-ghost-light"
+                        onClick={() => setShowPaymentQr((current) => !current)}
+                      >
+                        {showPaymentQr ? "HIDE QR" : "SCAN QR"}
+                      </button>
+
+                      <span className="text-xs text-ink/60">UPI: {UPI_ID}</span>
+                    </div>
+
+                    {showPaymentQr && (
+                      <div className="mt-5 flex justify-center rounded-lg border border-line bg-white p-5">
+                        <div className="text-center">
+                          <img
+                            src={UPI_QR_PATH}
+                            alt="Google Pay UPI QR code"
+                            className="mx-auto h-64 w-64 max-w-full object-contain"
+                          />
+                          <p className="mt-3 text-xs text-ink/60">
+                            Scan with a UPI app to pay.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {paymentSubmittedAt && (
+                      <div className="mt-5 rounded-md border border-yellow-700 bg-yellow-50 p-4">
+                        <p className="text-sm font-semibold text-yellow-900">
+                          Payment confirmation already submitted
+                        </p>
+                        <p className="mt-1 text-sm text-yellow-900/80">
+                          MYRONIX still needs to verify the payment. Final work will remain locked until verification.
+                        </p>
+                      </div>
+                    )}
+
+                    {paymentMessage && (
+                      <div role="status" className="mt-4 rounded-md border border-blue bg-mist p-4 text-sm font-medium">
+                        {paymentMessage}
+                      </div>
+                    )}
+
+                    {paymentError && (
+                      <div role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-800">
+                        {paymentError}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      className="btn btn-primary mt-4 w-full sm:w-auto"
+                      disabled={paymentSubmitting || Boolean(paymentSubmittedAt)}
+                      onClick={handlePaymentConfirmation}
+                    >
+                      {paymentSubmitting
+                        ? "SUBMITTING…"
+                        : paymentSubmittedAt
+                        ? "PAYMENT SUBMITTED"
+                        : "I HAVE PAID"}
+                    </button>
+                  </div>
+                )}
+
+                {paymentStatus === "paid" && (
+                  <div className="mt-5 rounded-lg border border-green-700 bg-green-50 p-5">
+                    <p className="text-sm font-semibold text-green-900">
+                      Payment verified
+                    </p>
+                    <p className="mt-1 text-sm text-green-900/80">
+                      Your payment has been verified by MYRONIX. Final work is now unlocked.
+                    </p>
+                  </div>
+                )}
+
+                {deliverableError && (
+                  <div
+                    role="alert"
+                    className="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-800"
+                  >
+                    {deliverableError}
+                  </div>
+                )}
+
+                {deliverableLoadStatus === "loading" && (
+                  <p className="mt-5 text-sm text-ink/70">
+                    Loading your files…
+                  </p>
+                )}
+
+                {deliverableLoadStatus === "empty" && (
+                  <p className="mt-5 text-sm text-ink/70">
+                    No deliverable has been uploaded for this order yet.
+                  </p>
+                )}
+
+                {deliverables.length > 0 && (
+                  <div className="mt-5 grid gap-3">
+                    {deliverables.map((file) => {
+                      const locked =
+                        file.payment_required && paymentStatus !== "paid";
+
+                      return (
+                        <div
+                          key={file.id}
+                          className="rounded-md border border-line p-4"
+                        >
+                          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="min-w-0">
+                              <p className="break-all text-sm font-semibold">
+                                {file.file_name}
+                              </p>
+
+                              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink/60">
+                                <span>
+                                  {file.is_preview ? "Preview" : "Final work"}
+                                </span>
+                                <span>
+                                  {file.payment_required
+                                    ? paymentStatus === "paid"
+                                      ? "Payment confirmed"
+                                      : "Payment required"
+                                    : "Available"}
+                                </span>
+                                <span>{formatDeliverableSize(file.file_size)}</span>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              className="btn btn-ghost-light shrink-0"
+                              disabled={locked || openingDeliverableId === file.id}
+                              onClick={() => openDeliverable(file)}
+                            >
+                              {openingDeliverableId === file.id
+                                ? "Opening…"
+                                : locked
+                                ? "Locked until payment"
+                                : "View / Download"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+          {authState === "signedin" && savedOrder && orderLoadStatus === "loaded" && (
+            <div className="mt-6 rounded-lg border border-line bg-white p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink/60">
+                    Project timeline
+                  </p>
+                  <h3 className="mt-2 text-xl font-semibold">
+                    Activity & Updates
+                  </h3>
+                  <p className="mt-1 text-sm text-ink/70">
+                    Follow important updates to your MYRONIX project.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost-light"
+                  disabled={activitiesLoading}
+                  onClick={() => refreshActivities(savedOrder.id)}
+                >
+                  {activitiesLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+
+              {activitiesError && (
+                <div role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-800">
+                  {activitiesError}
+                </div>
+              )}
+
+              <div className="mt-5 grid gap-4">
+                {activities.length === 0 && !activitiesLoading ? (
+                  <p className="text-sm text-ink/60">No timeline activity yet.</p>
+                ) : (
+                  activities.map((activity) => (
+                    <div key={activity.id} className="relative border-l-2 border-line pl-4">
+                      <p className="text-sm font-semibold">{activity.message}</p>
+                      <p className="mt-1 text-xs text-ink/50">
+                        {activity.actor_role === "admin" ? "MYRONIX" : "You"} · {new Date(activity.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {authState === "signedin" && savedOrder && orderLoadStatus === "loaded" && (
+            <div className="mt-6 rounded-lg border border-line bg-white p-6">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-ink/60">
+                    Project messages
+                  </p>
+                  <h3 className="mt-2 text-xl font-semibold">
+                    Chat with MYRONIX
+                  </h3>
+                  <p className="mt-1 text-sm text-ink/70">
+                    Send questions or updates about this project.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost-light"
+                  disabled={messagesLoading}
+                  onClick={() => refreshMessages(savedOrder.id)}
+                >
+                  {messagesLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+
+              {messageError && (
+                <div role="alert" className="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-800">
+                  {messageError}
+                </div>
+              )}
+
+              <div className="mt-5 max-h-80 overflow-y-auto rounded-md border border-line bg-mist p-4">
+                {messages.length === 0 && !messagesLoading ? (
+                  <p className="text-sm text-ink/60">No messages yet.</p>
+                ) : (
+                  <div className="grid gap-3">
+                    {messages.map((message) => (
+                      <div
+                        key={message.id}
+                        className={`rounded-md p-3 ${message.sender_role === "customer" ? "ml-6 bg-white" : "mr-6 bg-black text-white"}`}
+                      >
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] opacity-60">
+                          {message.sender_role === "customer" ? "You" : "MYRONIX"}
+                        </p>
+                        <p className="mt-1 whitespace-pre-wrap break-words text-sm">{message.message}</p>
+                        <p className="mt-2 text-[11px] opacity-50">
+                          {new Date(message.created_at).toLocaleString()}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-4 grid gap-3">
+                <textarea
+                  rows={3}
+                  maxLength={2000}
+                  className="field"
+                  placeholder="Write a message to MYRONIX…"
+                  value={messageText}
+                  onChange={(e) => setMessageText(e.target.value)}
+                  disabled={messageSending}
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-xs text-ink/50">{messageText.length}/2000</span>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={messageSending || !messageText.trim()}
+                    onClick={handleSendMessage}
+                  >
+                    {messageSending ? "Sending…" : "SEND MESSAGE"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {orderLoadStatus === "error" && (
             <div className="mt-6 rounded-lg border border-red-200 bg-red-50 p-5">
@@ -1362,5 +2129,6 @@ export default function EnquiryForm({
         </div>
       </div>
     </section>
-  );
+    );
+}
 }

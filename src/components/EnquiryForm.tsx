@@ -835,6 +835,7 @@ export default function EnquiryForm({
 
         return;
       }
+    }
 
     setSelectedFiles(incoming);
   }
@@ -2130,5 +2131,4 @@ export default function EnquiryForm({
       </div>
     </section>
     );
- }
- }
+}
